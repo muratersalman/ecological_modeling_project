@@ -1,0 +1,719 @@
+---
+title: "Modeling the Habitat Tracking Metapopulations Dynamics of 
+Osmoderma eremita on Ancient Oak Trees"
+output:
+  pdf_document: default
+  html_document: default
+date: "Murat Ersalman"
+---
+
+```{r}
+library(rdist)
+library(pracma)
+library(raster)
+library(viridis)
+library(VGAM)
+library(graphics)
+```
+
+\section*{BACKGROUND}
+
+Many species live in habitats that naturally exist as discrete fragments connected by dispersal. Local extinctions are often common in such populations, and regional persistence depends crucially on rates of immigration and emigration among local populations. Metapopulation theory has been quite successful in explaining the dynamics of patchy populations (Hanski 1991). Not all metapopulations occur on fixed and permanent habitat fragments. In some cases, the habitat patches themselves are dynamic and undergo frequent turnover. Examples may include invertebrates inhabiting systems of small ponds that are prone to drying out, pathogens that persist on hosts with their own birth-death dynamics, fugitive weeds that chase ephemeral openings in forests created by tree fall, or forest insects that survive on rotting wood.
+
+A well known example of a so-called "habitat tracking metapopulation" is the beetle species \textit{Osmoderma eremita}, which inhabits hollows in ancient oak trees. Oak trees begin forming hollows at around 200 years of age, after which they are suitable for colonization by the beetles. O.eremita inhabits these hollows as larva, feeding on wood mould, for up to 4 years before maturing into adulthood. Adults live only a few weeks, and rarely leave the hollows in which they were born (Lindeman et al. 2020). Lindeman et al. (2020) performed a 25 year study of an O.eremita metapopulation in Sweden, and found that connectivities between ancient oak trees played an important role in the persistence of the metapopulation. However, in habitat tracking metapopulations, temporal connectivity, or "habitat continuity" is also an important factor (Hanski 1999). In this project, I model the dynamics of the oak-O.eremita system, mostly relying on data provided in Lindeman et al. (2020) and Ranius et al. (2009). In particular, I investigate the persistence of the O.eremita population as a function spatio-tempral correlation in oak dynamics, and show that both spatial and temporal connectivity is important for metapopulation persistence. Moreover, I test the assumption of Lindeman et al. (2020) that damaging young oak trees to promote early formation of hollows may be an effective strategy for O.eremita conservation. The model suggests that this strategy may be ineffective if spatial clustering in new oak births is very high.
+
+\section*{MODEL ASSUMPTIONS}
+
+\subsection*{Parameter Values}
+
+The default parameter values were chosen as below. Definitions of the parameters and justification for their values are provided throughout the rest of this section. 
+
+```{r}
+parameters <- list(r = 4, a = 0.1, d.age.mid = 90, K.age.mid = 60, K.max = 100, 
+                   b = 0.5, c = 0.07, d = 0.04, s = 0.25, f=3, 
+                   l = 0.08, M = 50, s2 = 0.25, p.ext = 0.05, phi = 1)
+```
+
+
+\subsection*{Tree Connectivities}
+
+Following Hanski (1994), the connectivity, $C_{i}$, of tree $i$ was defined as:
+
+$$C_{i} = \sum_{j\neq i} N_j e^{-d_{ij} / l}$$
+
+where $N_j$ is the population size at tree $j$, $d_{ij}$ is the distance between the two trees and $l$ is the mean dispersal distance of a beetle, which was assumed to be 80 meters based on Hedin et al. (2008), who found that most beetles disperse less than 100 meters.
+
+```{r}
+# Function that calculates tree connectivities
+connectivities <- function(empty.xy, occupied.xy, pops, parameters) {
+  with(parameters, {
+    dist <- cdist(empty.xy, occupied.xy)                        # pairwise distances between patches
+    C <- exp(-dist/l)%*%pops               
+    return(rowSums(C))
+  })
+}
+
+plot(seq(0, 0.3, 0.01), connectivities(seq(0, 0.3, 0.01), 0, 1, parameters), 
+     type='l', ylim=c(0, 1), main="Distance-Connectivity Relationship",
+     xlab="Distance (km)", ylab="Connectivity")
+```
+
+\subsection*{Colonization Probability}
+
+The colonization probability for a tree, given its connectivity, was modeled as a type-II functional response following Hanski (1994):
+
+$$P(\text{colonization}) = \frac{C^2}{\frac{1}{c}+C^2}$$
+
+where $C$ is the connectivity of the tree, and $c$ is a constant determining the colonization ability of the species. The value of $c$ was tuned to $0.07$ for a good fit of the simulation results to empirical data provided in Lindeman et al. (2020). Note that the particular sigmoidal form of the colonization probability implies an Allee effect where multiple colonizers interact in a synergistic way to enhance the likelihood of colonization. It is not clear whether a colonization Allee effect is relevant for O.eremita, but given the requirement of finding a mate to establish a new population, it is not an unreasonable assumption. To reflect this fact, I assume that a newly colonized tree begins with 2 individuals representing a mating pair. In reality it is possible that the first immigrant is a pregnant female. Moreover, since each simulation timestep is assumed to represent a full decade, it is in reality possible that colonization occurs mid-decade, in which case the population would have grown to >2 individuals by the next census point. I ignore this possibility here. Relaxing this assumption is likely to have a negligible effect since this model ignores demographic stochasticity in beetle population dynamics.
+
+
+```{r}
+p.colonization <- function(C, parameters) {
+  with(parameters, {
+    return(C^2/(1/c + C^2))
+  })
+}
+
+plot(seq(0, 30, 0.01), p.colonization(seq(0, 30, 0.01), parameters), 
+     type='l', ylim=c(0, 1), main="Colonization Probability vs. Patch Connectivity",
+     xlab="Connectivity", ylab="Colonization Probability")
+```
+
+\subsection*{Local Population Dynamics of \textit{O.eremita}}
+
+Population growth within an individual tree was modeled as a deterministic discrete-time map following a Beverton-Holt curve, where the values were rounded to the neares whole number. The intrinsic per capita growth rate, $r$, was assumed to be 4 individuals/decade, based on the fact that O. eremita mature into adults at around age 4 and live only a few weeks afterwards (Lindeman et al. 2020), during which they produce about 1-25 eggs (Landvik 2018). Assuming a lifetime recruitment of 10 adults per mating pair (~5 per capita) over a course of 4 years, this corresponds to a per capita continuous time growth rate of $\ln(\sqrt[4]{5}) \approx 0.4$/year, or $\sim 4.0$/decade. Since O. eremita inhabits oak hollows, and hollows form as oaks age (Ranius et al. 2009), the carrying capacity, $K$, was assumed to depend on the age of a tree with a type-I functional response.
+
+$$N_{t+1}=\frac{e^r N_t}{1+\frac{e^r-1}{K(\text{age})}N_t}$$
+
+where
+$$K(\text{age}) = K_{max}\frac{e^{a(\text{age}-\text{age}_{mid})}}{1+e^{a(\text{age}-\text{age}_{mid})}}$$
+
+where $K_{\text{max}}$ is the maximumm theoretical carrying capacity assumed to be 100 individuals per Lindeman et al. (2020), $a$ is a constant determining the steepness of the increase in $K$ (assumed to be 0.1 arbitrarily) and $\text{age}_{\text{mid}}$ is the age at which the carrying capacity reaches half of the theoretical maximum, assumed to be 600 years.
+
+```{r}
+# Carrying Capacity
+K <- function(age, parameters) {
+  with(parameters, {
+    K <- K.max*exp(a*(age - K.age.mid))/(1 + exp(a*(age-K.age.mid))) # S-shaped age dependent K
+    return(K)
+  })
+}
+
+# Beverton-Holt type growth function that calculates population size at next timestep
+beverton.holt <- function(state, age, parameters) {
+  with(parameters, {
+    K <- K(age, parameters)
+    
+    N.next <- exp(r)*state/(1 + (exp(r)-1)/(K)*state) # Beverton-Holt dynamics
+    return(N.next)
+  })
+}
+
+par(mfrow=c(1,2))
+plot(seq(0, 4, 0.01), beverton.holt(seq(0, 4, 0.01), 25, parameters), type='l', ylim=c(0, 4), 
+     main="Discrete-Time Map 
+     for 250 Yr Old Tree", xlab="N(t)", ylab="N(t+1)")
+abline(0, 1, lty=3)
+
+plot(seq(0, 100, 0.1), K(seq(0, 100, 0.1), parameters), type='l', 
+     xlab="Tree Age (in decades)", ylab="Carrying Capacity")
+```
+
+Note that the Beverton-Holt map saturates rapidly on timescales measured in decades, so the population size is effectively reaches the carrying capacity given the age of the tree in a single generation.
+
+\subsection*{Oak Mortality}
+
+Lindeman et al. (2020) found that oak mortality was about $1.1\%$ per year, and tree fall rate was $0.4\%$ per year. They note that while beetle populations decline following tree mortality, populations can inhabit an oak for over a decade after it has fallen. In this model I define "mortality" as tree fall, which is assumed to occur with a probability of $4\%$ per tree per decade. Moreover, It is assumed that this probability is roughly constant throughout most of the life of a tree, but rises rapidly once an oak reaches about 800 years of age. Lindeman et al. note that the local extinction probability of O. eremita rises with tree age due to increased chance of tree mortality.
+
+$$P_\text{death}=d+(1-d)\frac{e^{s(\text{age}-\text{age}_{mid})}}{1+e^{s(\text{age}-\text{age}_{mid})}}$$
+
+where $d=0.04$ is the fall probability of a fresh tree, $\text{age}_\text{mid}=90$ is the age at which the fall probability reaches halfway between d and 1, and $s=0.25$ is a constant governing how fast the fall probability approaches unity. The parameter values and the form of the function are chosen to qualitatively reflect a reasonable mortality curve, though, with the exception of $d$, they are not based on precise empirical data.
+
+```{r}
+# Michaelis-Menten response for age-dependent tree mortality rate
+p.tree.death <- function(tree.ages, parameters) {
+  with(parameters, {
+    p.death <- d + (1-d)*exp(s*(tree.ages-d.age.mid))/(1 + exp(s*(tree.ages-d.age.mid)))
+    return(p.death)
+  })
+}
+
+plot(seq(0, 110, 0.1), p.tree.death(seq(0, 110, 0.1), parameters), type='l', ylim=c(0,1),
+     main = "Age Dependent Probability of Tree Fall", 
+     xlab="Tree Age (in decades)", ylab="Fall Probability")
+```
+
+\subsection*{Demographic Stochasticity}
+
+This model ignores direct effects of demographic stochasticity on beetle population dynamics. However, Lindeman et al. (2020) found that local extinction rates of beetles were higher than rates of tree fall or mortality, suggesting that demographic stochasticity plays an role. To account for this, I introduced a catastrophe probability equal to $5\%$, consistent with the findings of Lindeman et al. This implicitly assumes that a tree that was occupied at one census point is also occupied the year before the next census, since the $5\%$ extinction rate is an annual probability. However, in practice this assumption permits multiple extinction and colonization events between any two census points.
+
+\subsection*{Birth of Oak Trees}
+
+The mean number of acorns recruiting to adults per decade was modeled as a Beverton-Holt type curve:
+
+$$B = \frac{fN}{1+\frac{1}{b}N}$$
+
+where $N$ is the number of extant oak trees, $f$ is the intrinsic per capita fecundity of an oak tree, and $b$ is a constant determining the strength of negative density dependent effects on oak recruitment. An average oak tree was assumed to produce about $10,000$ acorns per mast year, which were assumed to occur $3$ times per decade, resulting in $30,000$ acorns per oak per decade. I assumed that on average, $1$ in $10,000$ acorns survived to adulthood (per Bethallyn Black, UC Davis), and most of the acorns remained within the simulated area, resulting in an estimate of 3 for the parameter $f$. The value of $b$ was chosen to provide a good fit to data provided in Lindeman et al. (2020). For simplicity, fecundity was assumed to be age independent. In reality, oaks do not produce acorns for the first few decades of their life, and when they do, old oaks can produce significantly more acorns than younger ones.
+
+```{r}
+# Inverse Michaelis-Menten birth rate fopr trees
+tree.birth.rate <- function(n_trees, parameters) {
+  with(parameters, {
+    birth.rate <- f*n_trees/(1 + (1/b)*n_trees)
+    return(birth.rate)
+  })
+}
+
+plot(seq(0, 20, 0.1), tree.birth.rate(seq(0, 20, 0.1), parameters), type='l',
+     main = "Density-Dependent Mean Recruitment",
+     xlab = "Number of Extant Trees", ylab = "Total Recruitment")
+```
+
+\subsubsection*{Spatial Correlation in Oak Births}
+
+The birth of new oaks was modeled as a Poisson point process (PPP) with a Gaussian intensity surface. At each timestep, the total number of new oak trees produced are determined by a Poisson random variable with mean $B$. The locations of the new trees are determined based on the relative magnitude of the intensity surface at each coordinate. The shape, location and movement of the intensity surface controls the degree of spatio-temporal correlation in oak births. A Gaussian surface with small variance corresponds to high spatial clustering of new births, whereas a large variance corresponds to a relatively homogenous distribution of the trees across the simulated area. It should be noted that regardless of the degree of clustering, the overall expected number of trees remains unchanged, allowing a direct study of the effect of clustering without confounding effects by varying tree numbers. The probability distribution for the number of new trees appearing in some region $A$ of the simulation area, $B_A$, can be defined hierarchically as:
+
+$$B_A \sim \text{Binom}(n=\tilde{B}, p=\frac{\int_{s\in A}\lambda(s)ds}{\int_\Omega\lambda(s)ds}) \cdot \text{Poisson}(\tilde{B}|B)$$
+
+which represents the fact the total number of new seeds produced, $\tilde{B}$, is Poisson distributed with mean $B$, and the probability that some number of those new trees will emerge in region $A$ follows a Binomial distribution with probability given by the intensity $\lambda(A)$ in that region relative to the intensity in the whole region, $\lambda(\Omega)$.
+
+\subsubsection*{Temporal Correlation in Oak Births}
+
+The degree of temporal correlation in new oak births is modeled through the movement of Gaussian intensity surface across the landscape. This movement is modeled as an AR(1) type process governed by:
+
+$$\mu(t+1) = \phi \mu(t) + (1-\phi)\epsilon$$
+
+where $\mu$ is the center point of the Gaussian intensity surface, $\epsilon$ is a random x-y coordinate, and $\phi \in[0,1]$ is a linear weight determining the degree of correlation between the location of the intensity surface at successive timesteps. $\phi=1$ corresponds to a completely static intensity surface, whereas $\phi=0$ corresponds to an intensity surface that is centered at a random location at each timestep.
+
+```{r}
+# Calculates Poisson point process relative intensity at a given x-y coordinate
+lambda <- function(loc, com, s2) { # input location to calculate intensity, matrix of all tree locations and variance of intensity
+  L <- dbinorm(loc[1], loc[2], com[1], com[2], s2, s2, 0) # multivariate Gaussian intensity function
+  return(L)
+}
+
+lambda.normalize <- function(width, height, com, s2) {
+  integral <- (pnorm(width/2, com[1], sqrt(s2)) - pnorm(-width/2, com[1], sqrt(s2)))*
+    (pnorm(height/2, com[2], sqrt(s2)) - pnorm(-height/2, com[2], sqrt(s2)))
+  return(integral)
+}
+
+# Setup grid to visualize intensity function
+lambda.grid <- function(width, height, com, s2) {
+  dx <- 0.05
+  x <- seq(-width/2, width/2, dx)
+  y <- seq(-height/2, height/2, dx)
+  grid <- meshgrid(x, y)
+  coords <- cbind(c(grid$X), c(grid$Y))
+  
+  intensity <- apply(coords, 1, lambda, com, s2) # calculate intensity at grid locations
+  
+  e <- extent(coords)
+  r <- raster(e, nrow=length(unique(coords[,2])), ncol=length(unique(coords[,1])))
+  z <- rasterize(coords, r, intensity, mean)
+  
+  return(z)
+}
+
+# Initialize tree locations
+generate.trees <- function(width, height, com, lambda.int, M, s2) {
+  lambda.max <- lambda(c(0, 0), c(0, 0), s2)
+  n.trees <- rpois(1, M*lambda.max/lambda.int*width*height)
+
+  candidate.x <- matrix(runif(n.trees, -width/2, width/2), ncol=1)
+  candidate.y <- matrix(runif(n.trees, -height/2, height/2), ncol=1)
+  candidate.pts <- cbind(candidate.x, candidate.y)
+  q <- apply(candidate.pts, 1, lambda, com, s2)/lambda.max
+  
+  selected <- (runif(n.trees) < q)
+  locs <- matrix(candidate.pts[selected,], ncol=2)
+  return(locs)
+}
+```
+
+```{r}
+width <- 3.5
+height <- 2
+
+M <- 225
+
+s2 <- 0.1
+com <- matrix(0, ncol=2)
+L.grid <- lambda.grid(width, height, com, s2)
+lambda.int <- lambda.normalize(width, height, com, s2)
+
+plot(L.grid, col=viridis_pal()(50), main = "High Spatial Correlation Example",
+     xlab="X-coordinate (km)", ylab="Y-coordinate (km)")
+points(generate.trees(width, height, com, lambda.int, M, s2)[,1:2], col="white", pch=16, cex=0.75)
+
+s2 <- 500
+L.grid <- lambda.grid(width, height, com, s2)
+lambda.int <- lambda.normalize(width, height, com, s2)
+
+plot(L.grid, col=viridis_pal()(50), main = "Low Spatial Correlation Example",
+     xlab="X-coordinate (km)", ylab="Y-coordinate (km)")
+points(generate.trees(width, height, com, lambda.int, M, s2), col="white", pch=16, cex=0.75)
+```
+
+
+\subsection*{Simulation Rules}
+
+The simulation is initialized with a Gaussian intensity surface centered on the origin of the plot with a specified variance. Next, an initial number of trees is generated with randomly assigned ages between 0 and 600 years old, and placed across the plot based on the relative intensity at each point. Each tree is initialized with a local population at half its age dependent carrying capacity. 
+
+At each timestep, trees become 1 year older, and die with an age dependent probability. Next, the intensity surface is moved to a location determined by the parameter $\phi$, after which new born trees are generated with a density dependent fecundity and placed across the plot conditional on the new location of the intensity surface.
+
+Next, local populations are updated based on the assumptions described above. Some of the populations suffer local catastrophes and thus become 0.
+
+Finally, empty trees are colonized with a probability determined by their connectivities.
+
+```{r}
+simulate <- function(width, height, timesteps, parameters) {
+  with(parameters, {
+    com <- c(0, 0)
+    lambda.int <- lambda.normalize(width, height, com, s2)
+    
+    init.locs <- generate.trees(width, height, com, lambda.int, M, s2)
+    init.ages <- round(runif(nrow(init.locs), 1, 60)) # initialize trees randomly between 10 and 600 years old
+    init.pops <- round(K(init.ages, parameters)/2) # initialize pops to 1/2 carrying capacity
+    
+    data <- data.frame(xcor = init.locs[,1], ycor = init.locs[,2], pop = init.pops, age = init.ages)
+    
+    total.pop <- c(sum(data$pop))
+    total.trees <- c(nrow(data))
+    total.occupied <- c(sum(data$pop>0))
+    tree.ages <- c()
+    for (t in 2:timesteps) {
+      # tree aging
+      data$age <- data$age + 1
+      
+      # tree deaths
+      p.death <- p.tree.death(data$age, parameters)
+      dead <- (runif(nrow(data)) < p.death)
+      data <- data[!dead,]
+      
+      # tree births
+      com <- phi*com + (1-phi)*cbind(runif(1,-width/2, width/2), runif(1,-height/2, height/2))
+      lambda.int <- lambda.normalize(width, height, com, s2)
+      b.rate <- tree.birth.rate(nrow(data), parameters)
+      new.tree.locs <- generate.trees(width, height, com, lambda.int, b.rate, s2)
+      if(nrow(new.tree.locs)>0) {
+        new.data <- cbind(new.tree.locs[,1], new.tree.locs[,2], 0, 0)
+        colnames(new.data) <- colnames(data)
+        data <- rbind(data, new.data)
+      }
+      
+      # calculate next population sizes
+      pop.next <- round(beverton.holt(data$pop, data$age, parameters))
+      data$pop <- pop.next
+      data$pop[is.na(data$pop)] <- 0
+      total.pop <- c(total.pop, sum(data$pop))
+      total.trees <- c(total.trees, nrow(data))
+      total.occupied <- c(total.occupied, sum(data$pop>0))
+      
+      # determine non-tree fall related extinctions
+      q.ext <- runif(nrow(data))
+      extinct <- (q.ext < p.ext)
+      data$pop[extinct] <- 0
+      
+      # determine colonizations
+      empty.tree.locs <- cbind(data[data$pop==0,]$xcor, data[data$pop==0,]$ycor)
+      occupied.tree.locs <- cbind(data[data$pop>0,]$xcor, data[data$pop>0,]$ycor)
+      C <- connectivities(empty.tree.locs, occupied.tree.locs, data[data$pop>0,]$pop, parameters)
+      p.colonize <- p.colonization(C, parameters)
+      colonized <- (runif(nrow(empty.tree.locs)) < p.colonize)
+      empties <- data[data$pop==0,]
+      
+      empties$pop[colonized] <- 2 # 2 initial colonizer as mating pair
+      data$pop[data$pop==0] <- empties$pop
+      
+      tree.ages <- c(tree.ages, c(data$age))
+    }
+    return(list(pop = total.pop, trees = total.trees, occupied = total.occupied, ages = tree.ages))
+  })
+}
+```
+
+\section*{FITTING THE MODEL TO EMPIRICAL DATA}
+
+To fit the model to empirical data, I first set up a 1ha plot based on the size of the area studied by Lindeman et al. Lindeman et al. studied 2 sites consisting of 200 hectares total. I assume that both sites were 100 hectares. In 1998, they sampled most suitable trees in those regions, corresponding to roughly 66 oak trees. I further assume that the oak trees were distributed uniformly across the study area, with about 30-40 oak trees per 100 hectare plot.I then set up a simulation on a 100 hectare plot, and defined a Gaussian intensity surface centered on the origin of the plot, with a variance set to 500 to mimic a uniform intensity surface. Next, I tuned the parameter $b$, which governs the strength of negative density dependent effects on oak fecundity, such that the quasi-equilibrium number of oak trees occuring on the plot was on the order of 30-40.
+
+With the parameter $b$ set to an appropriate value to mimic the study are of Lindeman et al., I moved forward to tuning parameter $c$. During their study, Lindeman et al. observed that approximately $50\%$ of suitable sampled trees were occupied by O.eremita. The parameter $c$ was chosen such that the simulated mean occupancy was roughly $50\%$.
+
+It should be noted that the only parameter that was tuned to fit the simulation to data is $c$. The parameter $b$ merely determines the equilibrium number of trees in the simulated plot, and can be changed arbitrarily to reflect conditions in different regions.
+
+```{r}
+set.seed(1)
+
+timesteps <- 2500
+
+width <- 1
+height <- 1
+
+parameters$s2 <- 500
+
+plot(generate.trees(width, height, com, 
+                    lambda.normalize(width, height, com, parameters$s2), 80, parameters$s2), 
+     pch=16, main="Sample 100ha Plot Used for Parameter Tuning", 
+     xlab="X-coordinate (km)", ylab="Y-coordinate (km)")
+
+results <- simulate(width, height, timesteps, parameters)
+```
+
+```{r}
+plot(results$trees, type='l', ylim=c(0, 1.1*max(results$trees)),
+     main="Simulated Occupancy", xlab="Time (in decades)", ylab="Count")
+lines(results$occupied, col="blue")
+legend("topright", legend = c("All Trees", "Occupied Trees"), col=c("black", "blue"),
+       lty=1, ncol=2, cex=0.7)
+
+plot(results$occupied/results$trees, type='l', ylim=c(0, 1),
+     main="Fraction of Occupied Trees", xlab="Time (in decades)", ylab="%")
+abline(h=0.5, lty=1, col="blue")
+abline(h=mean(results$occupied/results$trees), lty=1, col="red")
+legend("bottomright", legend=c("Simulated Mean", "Empirical Mean"), lty=1,
+       col=c("blue", "red"), cex=0.75)
+```
+
+```{r}
+plot(results$pop, type='l', lwd=0.75, ylim=c(0, max(results$pop)), 
+     main="Simulated Metapopulation Size", xlab="Time (in decades)", ylab="Total Population")
+abline(h=224, lty=1, col="blue")
+abline(h=441, lty=1, col="red")
+abline(h=87, lty=1, col="red")
+abline(h=mean(results$pop), lty=1, col="green")
+legend("topleft", legend=c("Simuated Mean", "Empirical Mean", "Empirical Min/Max"),
+       lty=1, col=c("green", "blue", "red"), ncol=3, cex=0.75)
+```
+
+In the above plot, the blue line corresponds to the mean population size estimated by Lindeman et al. (2020), in years where they surveyed 25-50 trees, and the red lines correspond to the minimum and maximum population size estimates for those years. Years in which <25 or >50 trees were sampled were excluded from these calculations, since the estimates are not comparable to the simulated plot of ~30-40 trees.
+
+Moreover, Lindeman et al. observed that the mean number of individuals per tree was about 6.1, with a minimum and maximum of 2.8 and 14.2 respectively.
+
+```{r}
+plot(results$pop/results$trees, type='l', ylim=c(0, max(results$pop/results$trees)),
+     main="Average Number of Individuals per Tree", xlab="Time (in decades)", ylab="Individuals")
+abline(h=6.1, lty=1, col="blue")
+abline(h=14.2, lty=1, col="red")
+abline(h=2.8, lty=1, col="red")
+abline(h=mean(results$pop/results$trees), lty=1, col="green")
+legend("topright", legend=c("Simulated Mean", "Empirical Mean", "Empirical Min/Max"), 
+       lty=1, col=c("green", "blue", "red"), ncol=3, cex=0.75)
+```
+
+Surprisingly, the simulated mean number of individuals per tree is closely in agreement with the data, even though the model was fit only based on the fraction of occupied trees. 
+
+Finally, Lindeman et al. (2020) estimated a coefficient of variation (CV) of about 5.7 for the mean number of individuals per tree. Comparing the simulation CV with the empirical data once again provides a surprising similarity. It should be noted, however, that this is based on a single simulation, and different runs result in CV's ranging from 0.45-0.6. The same criticism applies to the above plots. In some realizations, the metapopulation goes extinct. However, in the vast majority of runs, the results are closely in alignment with empirical results.
+
+```{r}
+CV <- c(sd(results$pop/results$tree)/mean(results$pop/results$tree), 0.57)
+
+barplot(CV, names = c("Simulated CV", "Empirical CV (Lindeman et al. 2020)"), 
+        ylim=c(0, 0.6), col=viridis_pal()(2),
+        main = "Simulated vs. Empirical Coefficient of Variation 
+        for Mean Number of Individuals per Tree")
+```
+
+The simulated timeseries for the total metapopulation size and the average number of beetles per tree are in remarkable agreement with data obtained by Lindeman et al. (2020), at least with respect to the mean, variance, minimum and maximum. However, a huge caveat is that the data collected by Lindeman et al. spanned a course of only 13 years, whereas the simulations above cover a period 25,000 years! This means that the data observed by Lindeman et al. (2020) correspond to a single timestep of the above simulation, during which they were able to observe the full range of population sizes whose realization took centuries in the simulation. As a result, while this model captures the stationary distribution of the metapopulation sizes quite well, it completely fails to reflect accurate temporal dynamics, in the sense that the autocorrelation is significantly higher than what one would expect from looking at empirical data. This may be due to the fact that beetle population dynamics within a single tree are modeled as a deterministic Beverton-Holt curve, which produces high degrees of correlation between the population sizes from one year to the next. In contrast, Lindeman et al. (2020) found significant variability in the year-to-year population sizes within each individual tree. This suggests that from one decade to another, population sizes in a given tree would likely be largely uncorrelated. It might have been more appropriate to model beetle population sizes as random, independent draws from a distribution at each time step, rather than relying on a deterministic Beverton-Holt curve. However, this model considers immense temporal scales in which a single timestep represents a decade, so it would be quite difficult to determine an appropriate variance parameter governing the local stochastic fluctuations in a beetle population.
+
+\subsection*{Temporal Auto-Correlation and Spectral Analysis}
+
+```{r}
+ACF <- acf(cbind(results$pop, results$trees), lag.max = 1000, type='correlation', plot=F)
+
+plot(ACF$lag[,1,1], ACF$acf[,1,1], type='h',
+     main = "Autocorrelation of Beetle Population",
+     xlab="Lag (in decades)", ylab="Auto-correlation")
+abline(h=0, col="red")
+abline(v=0, col="red")
+
+plot(ACF$lag[,2,2], ACF$acf[,2,2], type='h',
+     main = "Autocorrelation of Tree Population",
+     xlab="Lag (in decades)", ylab="Auto-correlation")
+abline(h=0, col="red")
+abline(v=0, col="red")
+
+plot(c(rev(ACF$lag[,2,1]), ACF$lag[,1,2]), c(rev(ACF$acf[,2,1]), ACF$acf[,1,2]), type='h',
+     main = "Autocorrelation Between Beetles and Trees",
+     xlab="Lag (in decades)", ylab="Auto-correlation")
+abline(h=0, col="red")
+abline(v=0, col="red")
+```
+
+The peak of the autocorrelation function between the metapopulation size and the number of trees occurs slightly to the right of the origin, at a lag of approximately 200 years This suggests that the beetle population tracks the tree population with a lag of about 200 years. Based on Ranius et al. (2009), oak trees begin to form hollows when they are around 200 years old, and colonization of younger trees is unlikely (< 1% of oaks younger than 100 years old have hollows). In this model, however, I assumed that trees with all ages are suitable for colonization, though younger trees are assumed to have smaller carrying capacities. Moreover, Lindman et al. (2020) suggested that the colonization rate of trees increases with tree age. In this model, I assumed that the colonization probability of a tree is age-independent. The resulting lag between oak and beetle dynamics nonetheless appears to be consistent with data, although the results are quite variable between different simulation runs, with the lag typically ranging from 0 to 500 years.
+
+It also appears that both the tree and the beetle dynamics are quasi-periodic. We can examine the spectral density of the autocorrelation functions to determine the dominant frequencies.
+
+```{r}
+par(mfrow=c(1,3))
+w.var <- (0:(nrow(ACF$lag)/2-1))*0.1/nrow(ACF$lag)
+
+ft.11 <- abs(fft(ACF$acf[,1,1]))
+SD.11 <- 2*ft.11[1:(length(ft.11)/2)]
+plot(w.var, SD.11, type='h', main="Beetles", 
+     xlab="Frequency (/yr)", ylab="Spectral Density")
+points(w.var[which.max(SD.11)], max(SD.11), pch=16, col="red")
+
+ft.22 <- abs(fft(ACF$acf[,2,2]))
+SD.22 <- 2*ft.22[1:(length(ft.22)/2)]
+plot(w.var, SD.22, type='h', main="Oaks", 
+     xlab="Frequency (/yr)", ylab="Spectral Density")
+points(w.var[which.max(SD.22)], max(SD.22), pch=16, col="red")
+
+w.covar <- (0:(nrow(ACF$lag)-1))*0.1/(nrow(ACF$lag)*2)
+ft.12 <- abs(fft(c(rev(ACF$acf[,2,1]), ACF$acf[,1,2])))
+SD.12 <- 2*ft.12[1:(length(ft.12)/2)]
+
+plot(w.covar, SD.12, type='h', main="Beetle-Oak 
+Covariance", 
+     xlab="Frequency (/yr)", ylab="Spectral Density")
+points(w.covar[which.max(SD.12)], max(SD.12), pch=16, col="red")
+
+par(mfrow=c(1,3))
+plot(1/w.var[2:length(w.var)], SD.11[2:length(SD.11)], type='h', main = "Beetle",
+     xlab="Period (years)", ylab="Weight")
+plot(1/w.var[2:length(w.var)], SD.22[2:length(SD.22)], type='h', main = "Oak",
+     xlab="Period (years)", ylab="Weight")
+plot(1/w.covar[2:length(w.covar)], SD.12[2:length(SD.12)], type='h', main = "Beetle-Oak
+Covariance", xlab="Period (years)", ylab="Weight")
+```
+
+We can see that fluctuations in both beetle and oak populations, as well as the auto-correlation between them, are dominated by periodicities of about ~1,000-6,000 years, with a center of about 2,000 years. This is, however, based on a single simulation, and the results are quite variable between different runs. 
+
+\subsection*{Quasi-Stable Age Distribution of Oak Trees}
+
+```{r}
+hist(results$ages, probability = T, breaks = 50, main = "Quasi-Stable Tree Age Distribution",
+     xlab = "Age", ylab="Frequency")
+abline(v=mean(results$ages), lty=2, col="red")
+abline(v=1/parameters$d, lty=2, col="blue")
+abline(v=20.3, lty=2, col="green")
+lines(0:100, parameters$d*exp(-parameters$d*c(0:100)), col="blue", lwd=2)
+legend("topright", legend = c("Simulated Mean Age", 
+                              "Theoretical Mean Age with 0.4% Annual Fall Rate",
+                              "Mean Age in Ranius et al. (2009)",
+                              "Theoretical Age Distribution with 0.4% Annual Fall Rate"),
+       lty=c(2, 2, 2, 1), col=c("red", "blue", "green", "blue"), cex=0.75)
+```
+
+The mean tree age is about 200 years, which is in very close agreement with data collected by Ranius et al. (2009), who found that the mean ages ranged from 163-246 years old depending on the study area, with a mean of ~203 years old. However, the histogram above has a much higher variance than the trees in the areas studied by Ranius et al (2009). First of all, there is a significant zero inflation. 0-10 year old trees are greatly underestimated by the theoretical curve. This is largely due to the assumption that mortality rates rise rapidly in trees that are older than 800, which leave behind available spots for new trees to occupy. Delaying the maximum age smooths out the zero inflation, and the simulated histogram approaches the theoretical curve. Second, the oldest tree in the study area of Ranius et al. (2009) was just short of 400 years old. The histogram, on the other hand, indicates a fairly large probability mass in much older trees. This suggests that the mortality curve used in the simulation saturates too late compared to that experienced by the oaks in the sites studied by Ranius et al. (2009). Certain species of oaks can, however, live up to a 1,000 years or more, so the assumptions of this model still offer some realism.
+
+\section*{THE EFFECTS OF SPATIO-TEMPORAL CORRELATION ON METAPOPULATION PERSISTENCE}
+
+```{r}
+set.seed(1)
+
+timesteps <- 200
+width <- 3.5
+height <- 2
+parameters$b <- 1
+
+nreps <- 100
+phis <- seq(0, 1, length.out=6)
+s2s <- seq(0.1, 0.5, length.out=6)
+
+results.mean <- array(NA, dim = c(length(phis), length(s2s)))
+results.var <- array(NA, dim = c(length(phis), length(s2s)))
+results.ext <- array(NA, dim = c(length(phis), length(s2s)))
+results.trees <- array(NA, dim = c(length(phis), length(s2s)))
+results.occupied <- array(NA, dim = c(length(phis), length(s2s)))
+for (i in 1:length(phis)) {
+  for (j in 1:length(s2s)) {
+    parameters$phi <- phis[i]
+    parameters$s2 <- s2s[j]
+    
+    mean.pop <- c()
+    var.pop <- c()
+    extinction.status <- c()
+    mean.trees <- c()
+    occupancy <- c()
+    for (rep in 1:nreps) {
+      sim.run <- simulate(width, height, timesteps, parameters)
+      mean.pop <- c(mean.pop, mean(sim.run$pop))
+      var.pop <- c(var.pop, var(sim.run$pop))
+      extinct <- (sim.run$pop[timesteps]==0)
+      extinction.status <- c(extinction.status, extinct)
+      mean.trees <- c(mean.trees, sim.run$trees)
+      occupancy <- c(occupancy, sim.run$occupied)
+    }
+    results.mean[i, j] <- mean(mean.pop)
+    results.var[i, j] <- mean(var.pop)
+    results.ext[i, j] <- mean(extinction.status)
+    results.trees[i, j] <- mean(mean.trees)
+    results.occupied[i, j] <- mean(occupancy)
+  }
+}
+```
+
+```{r}
+filled.contour(phis, s2s, results.mean,
+               main = "Mean Population Size", xlab="Phi", ylab="s2")
+filled.contour(phis, s2s, results.occupied/results.trees,
+               main = "Fraction of Trees Occupied", xlab="Phi", ylab="s2")
+filled.contour(phis, s2s, results.mean/results.trees,
+               main = "Average Population Size per Tree", xlab="Phi", ylab="s2")
+filled.contour(phis, s2s, sqrt(results.var)/results.mean,
+               main = "Population Coefficient of Variation", xlab="Phi", ylab="s2")
+filled.contour(phis, s2s, results.ext,
+               main = "Probability of Extinction in 2000 Years", xlab="Phi", ylab="s2")
+```
+
+We can see that the mean population size, the mean population size per tree, and the fraction of occupied trees are all highest for high degrees of spatio-temporal correlation in environmental conditions/new tree births. Both spatial and temporal correlation in tree births increases the effective connectivity of the trees. As a corollary, the probability of metapopulation extinction is also smallest for high spatio-temporal correlation. Moreover, regions in the parameter space that correspond to high extinction risk also correspond to high coefficient of variation. This suggests the possibility that the coefficient of variation can be used as an indicator of extinction risk. Caution is needed, however, since the CV plotted here includes populations that have already gone extinct. A more appropriate test for the potential of CV as an indicator of extinction risk would be based on the conditional CV given the population is still extant. The qualitative result, however, is likely to be similar to the unconditional case. Finally, the curvature of the contour lines suggest that for high values of $\sigma^2$, the importance of $\phi$ diminishes. This is an intuitive result: if the intensity surface is uniform everywhere, then it becomes invariant to translations in space.
+
+
+\section*{PROMOTING HOLLOW FORMATION IN YOUNG TREES: AN EFFECTIVE CONSERVATION STRATEGY?}
+
+Since O.eremita exclusively inhabits hollows, Lindeman et al. (2020) suggested that damaging young trees and forcing them to form hollows early on may be a valid strategy for the beetles conservation. 
+
+In this section I test this hypothesis under two scenarios of high and low spatial correlation in new oak births, and examine the outcome under different values for the temporal correlation parameter $\phi$. The effect of damaging young oaks is simulated by varying the parameter $\text{age}_{\text{mid}}$ which determines the age of an oak at which the carrying capacity reaches $50\%$ of the theoretical maximum. By default, this value is assumed to be $600$ years. By forcing hollows to form earlier, damaging young trees is assumed to shift the inflection point to younger ages.
+
+\subsection*{Low Spatial Correlation}
+
+Here, I consider a case where $\sigma^2=1$, corresponding to the low correlation scenario.
+
+```{r}
+set.seed(1)
+
+timesteps <- 200
+width <- 3.5
+height <- 2
+parameters$s2 <- 1
+parameters$b <- 0.7
+
+nreps <- 100
+phis <- seq(0, 1, length.out=6)
+K.age.mids <- seq(40, 60, length.out=6)
+
+results.mean <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.ext <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.trees <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.occupied <- array(NA, dim = c(length(phis), length(K.age.mids)))
+for (i in 1:length(phis)) {
+  for (j in 1:length(K.age.mids)) {
+    parameters$phi <- phis[i]
+    parameters$K.age.mid <- K.age.mids[j]
+    
+    mean.pop <- c()
+    extinction.status <- c()
+    mean.trees <- c()
+    occupancy <- c()
+    for (rep in 1:nreps) {
+      sim.run <- simulate(width, height, timesteps, parameters)
+      mean.pop <- c(mean.pop, mean(sim.run$pop))
+      extinct <- (sim.run$pop[timesteps]==0)
+      extinction.status <- c(extinction.status, extinct)
+      mean.trees <- c(mean.trees, sim.run$trees)
+      occupancy <- c(occupancy, sim.run$occupied)
+    }
+    results.mean[i, j] <- mean(mean.pop)
+    results.ext[i, j] <- mean(extinction.status)
+    results.trees[i, j] <- mean(mean.trees)
+    results.occupied[i, j] <- mean(occupancy)
+  }
+}
+```
+
+```{r}
+filled.contour(phis, K.age.mids, results.mean,
+               main = "Mean Population Size", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.occupied/results.trees,
+               main = "Fraction of Trees Occupied", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.mean/results.trees,
+               main = "Average Population Size per Tree", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.ext,
+               main = "Probability of Extinction in 2000 Years", xlab="Phi", ylab="Age of reaching K/2")
+```
+
+We can see that the contour lines are nearly horizontal, suggesting that damaging young trees by decreasing the age of $\frac{1}{2}K$ is likely to be an effective strategy, and is predicted to increase mean population sizes and occupancy rates, as well as reduce extinction probability.
+
+\subsection*{High Spatial Correlation} 
+
+Now I consider a case where $\sigma^2=0.025$, corresponding to the high spatial correlation scenario.
+
+```{r}
+set.seed(1)
+
+timesteps <- 200
+width <- 3.5
+height <- 2
+parameters$s2 <- 0.025
+parameters$b <- 0.3
+
+nreps <- 100
+phis <- seq(0, 1, length.out=6)
+K.age.mids <- seq(40, 60, length.out=6)
+
+results.mean <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.ext <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.trees <- array(NA, dim = c(length(phis), length(K.age.mids)))
+results.occupied <- array(NA, dim = c(length(phis), length(K.age.mids)))
+for (i in 1:length(phis)) {
+  for (j in 1:length(K.age.mids)) {
+    parameters$phi <- phis[i]
+    parameters$K.age.mid <- K.age.mids[j]
+    
+    mean.pop <- c()
+    extinction.status <- c()
+    mean.trees <- c()
+    occupancy <- c()
+    for (rep in 1:nreps) {
+      sim.run <- simulate(width, height, timesteps, parameters)
+      mean.pop <- c(mean.pop, mean(sim.run$pop))
+      extinct <- (sim.run$pop[timesteps]==0)
+      extinction.status <- c(extinction.status, extinct)
+      mean.trees <- c(mean.trees, sim.run$trees)
+      occupancy <- c(occupancy, sim.run$occupied)
+    }
+    results.mean[i, j] <- mean(mean.pop)
+    results.ext[i, j] <- mean(extinction.status)
+    results.trees[i, j] <- mean(mean.trees)
+    results.occupied[i, j] <- mean(occupancy)
+  }
+}
+```
+
+```{r}
+filled.contour(phis, K.age.mids, results.mean,
+               main = "Mean Population Size", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.occupied/results.trees,
+               main = "Fraction of Trees Occupied", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.mean/results.trees,
+               main = "Average Population Size per Tree", xlab="Phi", ylab="Age of reaching K/2")
+filled.contour(phis, K.age.mids, results.ext,
+               main = "Probability of Extinction in 2000 Years", xlab="Phi", ylab="Age of reaching K/2")
+```
+
+We can see that when spatial correlation is high, the contour lines for the fraction of occupied trees and the probability of extinction are much more vertical, suggesting that, contrary to the claims of Lindman et al. (2020), damaging young trees and effectively increasing the carrying capacity may not be a particularly effective conservation strategy. A possible explanation is that when spatial correlation is high, and temporal correlation is low enough to threaten the metapopulation, new trees tend to be born in tight, isolated clusters, making it unlikely that they will be colonized in the near future regardless of their carrying capacity. Damaging young trees is thus equivalent to increasing carrying capacity in habitat that will not be occupied in the first place. However, damaging young trees still increases the mean population size, both at the metapopulation and the individual tree level, even though occupancy rates and extinction risk remains largely constant.
+
+\section*{CONCLUSION}
+
+In this project, I modeled the dynamics of a habitat tracking metapopulation of the beetle O.eremita, which inhabits hollows in ancient oaks. The parameters of the model were largely determined from on empirical data to the extent that they were available, albeit in a rough and non-rigorous way. After the model was fit to data, I investigated the persistence of the beetle metapopulation in response to various degrees of spatio-temporal correlation in suitable oak habitat. Suitable oak habitat is defined as regions with relatively higher probability of new oak births. Spatial correlation refers to the clustering among new born oaks of a given cohort, whereas temporal correlation refers to the degree of correlation between the birth locations of subsequent generations. Consistent with previous studies (Hanski), the model suggests both spatial and temporal connectivity is important for metapopulation persistence. 
+
+Lindeman et al. (2020) had suggested that damaging young oak trees to promote early formation of hollows may be a good conservation strategy to enhance the likelihood of O.eremita persistence. This model also showed that this strategy is unlikely to be very effective in cases where suitable oak habitat has high spatial connectivity but low tempral connectivity, because in such cases new oak trees are likely to be born far away from their parents and will be difficult to colonize in short timescales. As a result, even if young trees are damaged to form hollows, the extant beetle population will likely fail to colonize them. However, given the fairly haphazard way in which parameters were estimated for this model, these conclusions should not be taken too seriously. More serious work on estimating parameters would make the predictions more reliable.
+
+
+\section*{References}
+
+[1] Hanski, Ilkka. "Single-species metapopulation dynamics: concepts, models and observations." Biological journal of the Linnean Society 42.1-2 (1991): 17-38.
+
+[2]Hanski, Ilkka. "A practical model of metapopulation dynamics." Journal of animal ecology (1994): 151-162.
+
+[3] Hanski, Ilkka. "Habitat connectivity, habitat continuity, and metapopulations in dynamic landscapes." Oikos (1999): 209-219.
+
+[4] Hedin, Jonas, et al. "Restricted dispersal in a flying beetle assessed by telemetry." Biodiversity and Conservation 17 (2008): 675-684.
+
+[5] Landvik, Matti. "ISOLATED IN THE LAST REFUGIUM." (2018)
+
+[6] Lindman, Ly, et al. "Metapopulation dynamics over 25 years of a beetle, Osmoderma eremita, inhabiting hollow oaks." Oecologia 194 (2020): 771-780.
+
+[7] Ranius, Thomas, Mats Niklasson, and Niclas Berg. "Development of tree hollows in pedunculate oak (Quercus robur)." Forest Ecology and management 257.1 (2009): 303-310.
+
+[8] Interview with Bethallyn Black, UC Davis: https://www.ucdavis.edu/news/bumper-crop-acorns-only-1-10000-grows-tree#:~:text=A.%3A%20Only%20one%20in%2010%2C000,promising%20for%20that%20much%20rain.
+
+
+
+
+
+
+
+
+
